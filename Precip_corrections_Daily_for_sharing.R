@@ -24,7 +24,7 @@ Station_ID <- "" #Look up the DMI station Id's here: https://confluence.govcloud
 Grid_ID <- "10km_625_53" #Find your grid cell ID here: https://dmidk.github.io/Climate-Data-Grid-Map/
 Date_from <- "2013-01-01T00:00:00Z" #Always format yyyy-mm-ddThh:mm:ssZ
 Date_to <- "2023-01-01T00:00:00Z" #Always format yyyy-mm-ddThh:mm:ssZ
-API_key <- "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"#Your climateData API key (or metObs API key for raw data without quality control)
+API_key <- "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" #Your climateData API key (or metObs API key for raw data without quality control)
 Request <- paste(Request_base,Service_ID,"collections/",Collection_ID,"items?cellId=",Grid_ID,"&datetime=",Date_from,"/",Date_to,"&timeResolution=day&limit=100000&api-key=",API_key,sep="")
 
 #Send request to DMI's API and process the response. Might take a few seconds for big datasets. 
@@ -38,11 +38,15 @@ meteo <- APIlist %>% select(properties.from,properties.cellId,properties.paramet
 meteo$date <- meteo$properties.from %>% substr(1,13) %>% ymd_h() %>% date()
 meteo <- select(meteo,date,"metp"=mean_temp,"meanwv"=mean_wind_speed,"glorad"=mean_radiation,"prec"=acc_precip)
 rm(API_key,Collection_ID,Date_from,Date_to,Grid_ID,Request_base,Service_ID,Station_ID,Request,APIraw,APIlist)
+meteo <- meteo[order(meteo$date),]
+row.names(meteo) <- c(1:nrow(meteo))
 
 #Option B: read your own weather data file. Need at least daily precipitation, mean temperature and mean wind speed.
 meteo2 <- read.csv(file="your file path",stringsAsFactors = F,header=T)#If you have the file in .csv, plug the file path here
 meteo <- mutate(meteo,date=date(dmy(date)))
 #Check column names. MUST BE: Date = "date", precipitation = "prec", temperature = "metp, wind speed = "meanwv"
+
+#
 
 #Part 2: Cleanup of missing data. Note: The latest data in AGRO database requires minimal to no cleanup.
 #ONLY if you distrust your dataset. Otherwise, skip to Part 3.
@@ -90,10 +94,11 @@ rm(meteo1)
 rm(thetimes)
 missing_rows <- select(missing_rows,datum)
 
-
+#
 
 #Part 3: Calculating parameters and preliminary variables.
 #Adjust Wind data to 1.5 m using the log wind profile law
+#Make sure you don't already have wind speed at 1.5 m
 displacement <- 0
 rough_height <- 0.023
 corr_wind = log((1.5-displacement)/rough_height)/log((10-displacement)/rough_height)
@@ -137,18 +142,23 @@ meteo <- mutate(meteo,w_s=0)
 meteo$dy <- mday(meteo$date)
 meteo$yr <- year(meteo$date)
 
-#Generous calculation. Assigns the daily wetting correction to any precipitation every CLOCK day.
-#Yeah, another loop. OBS! slow process.
+#Fast version. Only works if there are NO GAPS in dates
+i <- 1
 ptm <- proc.time()
 for (y in c(min(year(meteo$date)):max(year(meteo$date)))){
-  for (m in c(1:12)){
+  for (m in c(min(month(meteo$date)[year(meteo$date)==y]):max(month(meteo$date)[year(meteo$date)==y]))){
     wet_r <- wetting_rain[m]
     wet_s <- wetting_snow[m]
-    for (d in (c(1:as.integer(days_in_month(month(m)))))){
-      counter_r <- meteo$prec[meteo$yr==y & meteo$mnd==m & meteo$dy==d & meteo$metp>=0]>0
-      counter_s <- meteo$prec[meteo$yr==y & meteo$mnd==m & meteo$dy==d & meteo$metp<0]>0
-      meteo$w_r[meteo$yr==y & meteo$mnd==m & meteo$dy==d & meteo$prec>0 & meteo$metp>=0] <- wet_r/sum(counter_r)
-      meteo$w_s[meteo$yr==y & meteo$mnd==m & meteo$dy==d & meteo$prec>0 & meteo$metp<0] <- wet_s/sum(counter_s)
+    for (d in c(min(mday(meteo$date)[year(meteo$date)==y & month(meteo$date)==m]):max(mday(meteo$date)[year(meteo$date)==y & month(meteo$date)==m]))){
+      if(meteo$prec[i]>0 & meteo$metp[i]<0){
+        meteo$w_r[i] <- 0
+        meteo$w_s[i] <- wet_s
+      }
+      else if(meteo$prec[i]>0 & meteo$metp[i]>=0){
+        meteo$w_r[i] <- wet_r
+        meteo$w_s[i] <- 0
+      }
+      i <- i+1
     }
   }
 }
@@ -190,3 +200,8 @@ write.csv(Final,file="../your file path here")
 plot(meteo$date,meteo$metp,type="l",main="Mean daily temperature",xlab="Date",ylab="(deg C)")
 plot(meteo$date,meteo$prec,type="l",main="Uncorrected daily prec.",xlab="Date",ylab="(mm)")
 plot(meteo$date,meteo$wind_150cm,type="l",main="Mean wind speed @ 1.5 m",xlab="Date",ylab="(m/s)")
+
+#Compute yearly totals and differences
+meteo_yr <- meteo %>% group_by(yr) %>% summarize(tot_precip=sum(prec),tot_precip_Allerup=sum(Allerup_precip),tot_precip_Allerup_wetting=sum(Allerup_wetting_precip)) %>% data.frame()
+meteo_yr$diff_Allerup <- meteo_yr$tot_precip_Allerup-meteo_yr$tot_precip
+meteo_yr$diff_Allerup_wetting <- meteo_yr$tot_precip_Allerup_wetting-meteo_yr$tot_precip
